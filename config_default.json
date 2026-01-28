@@ -1,0 +1,49 @@
+{
+  "dry_run": true,
+  "git": {
+    "executable": "git",
+    "fetch_prune": true,
+    "https_auth": {
+      "extraheader_basic_user": "",
+      "mode": "prompt"
+    },
+    "on_dirty_repo": "skip",
+    "protocol": "ssh",
+    "reset_hard_to_origin": true,
+    "ssh": {
+      "alias": "",
+      "clone_url_include_user": false,
+      "clone_url_style": "scp",
+      "host_overrides": {},
+      "identity_only": true,
+      "key_path": "",
+      "port": 22
+    }
+  },
+  "gitea": {
+    "api_base_path": "/api/v1",
+    "base_url": "https://git.example.com",
+    "page_limit": 50,
+    "timeout_s": 30,
+    "token": "",
+    "token_env": "GITEA_TOKEN",
+    "user_agent": "gitea-repo-sync/1.0",
+    "verify_tls": true
+  },
+  "logging": {
+    "default_dir_name": "_logs",
+    "dir": "",
+    "enabled": true,
+    "file_name": ""
+  },
+  "sync": {
+    "archive_dir_name": "_archive",
+    "archive_missing_remote": true,
+    "archive_stamp_format": "%Y%m%d_%H%M%S",
+    "clone_missing": true,
+    "layout": "owner/repo",
+    "manifest_file_name": "_repo_sync_manifest.json",
+    "output_dir": "D:/Git/GiteaMirror",
+    "update_existing": true
+  }
+}
