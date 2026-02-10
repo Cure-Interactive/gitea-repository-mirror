@@ -1026,6 +1026,16 @@ def _sync_one_repo(
   if not clone_url:
     raise RuntimeError(f"No clone URL for repo: {repo.get('full_name')!r}")
 
+  # For SSH mode, normalize clone URL through configured alias (if any).
+  if protocol == "ssh":
+    try:
+      rewritten = _git_ssh_rewrite_clone_url(cfg, clone_url)
+      if rewritten and rewritten != clone_url:
+        _log("[🔁 SSH]", f"Clone URL rewritten via alias: {clone_url} -> {rewritten}")
+        clone_url = rewritten
+    except Exception:
+      pass
+
   # Build extra git config (auth / ssh) per protocol
   extra_cfg: t.List[str] = []
 
@@ -1066,6 +1076,27 @@ def _sync_one_repo(
   if not t.cast(bool, cfg["sync"]["update_existing"]):
     _log("[⏭️ SKIP]", f"Update disabled; existing {dest_rel}")
     return False
+
+  # In SSH mode, attempt to align existing origin URL with configured alias.
+  # This is best-effort so it cannot break normal updates.
+  if protocol == "ssh":
+    try:
+      origin_url = _git_origin_url(git_exe, dest_abs, dry_run=dry_run)
+      if origin_url:
+        rewritten_origin = _git_ssh_rewrite_clone_url(cfg, origin_url)
+        if rewritten_origin and rewritten_origin != origin_url:
+          _log("[🔁 SSH]", f"Origin URL rewritten via alias: {origin_url} -> {rewritten_origin}")
+          rc_set = _git(
+            git_exe,
+            ["remote", "set-url", "origin", rewritten_origin],
+            cwd=dest_abs,
+            dry_run=dry_run,
+            extra_git_config=extra_cfg,
+          )
+          if rc_set != 0:
+            _log("[⚠️ WARN]", "Could not set origin URL to alias; continuing with existing origin.")
+    except Exception as e:
+      _log("[⚠️ WARN]", f"Origin alias rewrite skipped: {e}")
 
   _sep(f"UPDATE {repo.get('full_name')}")
   rc = _git(
@@ -3049,6 +3080,11 @@ def _gui() -> int:
     name = status["name"]
     phase = status["phase"]
     idx = status.get("index", "")
+    idx_int: int | None = None
+    try:
+      idx_int = int(str(idx))
+    except Exception:
+      idx_int = None
 
     if phase == "done":
       label = "Done"
@@ -3081,9 +3117,9 @@ def _gui() -> int:
       commit_message=str(status.get("last_commit_message") or ""),
     )
 
-    try:
-      zebra = "even" if (int(str(idx)) % 2 == 0) else "odd"
-    except Exception:
+    if idx_int is not None:
+      zebra = "even" if (idx_int % 2 == 0) else "odd"
+    else:
       zebra = "odd"
 
     tag = f"{status_tag_base}_{zebra}" if status_tag_base else zebra
@@ -3091,7 +3127,7 @@ def _gui() -> int:
     if name in _repo_tree_iids:
       iid = _repo_tree_iids[name]
       old_vals = repo_tree.item(iid, "values") or ()
-      row_idx = old_vals[0] if old_vals else idx
+      row_idx = idx if idx_int is not None else (old_vals[0] if old_vals else idx)
 
       repo_tree.item(
         iid,
@@ -3105,6 +3141,13 @@ def _gui() -> int:
         ),
         tags=(tag,),
       )
+
+      # Keep visual order aligned with current run index.
+      if idx_int is not None:
+        children = repo_tree.get_children()
+        if children:
+          target = max(0, min(idx_int - 1, len(children) - 1))
+          repo_tree.move(iid, "", target)
       return
 
     iid = repo_tree.insert(
@@ -3121,6 +3164,13 @@ def _gui() -> int:
       tags=(tag,),
     )
     _repo_tree_iids[name] = iid
+
+    # New rows discovered during a run should still land at their run index.
+    if idx_int is not None:
+      children = repo_tree.get_children()
+      if children:
+        target = max(0, min(idx_int - 1, len(children) - 1))
+        repo_tree.move(iid, "", target)
 
   def _validate_cfg_for_run(cfg: Json) -> t.Tuple[bool, str]:
     base_url = t.cast(str, _cfg_get(cfg, ["gitea", "base_url"], "")).strip()

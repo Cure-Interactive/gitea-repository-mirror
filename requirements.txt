@@ -1,3 +1,4 @@
 requests>=2.31.0
+charset-normalizer>=3.3.0
 customtkinter>=5.2.2
-CTkToolTip>=0.9
+CTkToolTip>=0.8
