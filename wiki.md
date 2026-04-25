@@ -339,6 +339,7 @@ Config is loaded in this order:
 * `clone_missing` (bool): default `true`
 * `update_existing` (bool): default `true`
 * `archive_missing_remote` (bool): default `true`
+* `post_update_gc` (bool): default `false`; after clone/update, run immediate reflog expiry plus `git gc --prune=now --aggressive`
 * `archive_stamp_format` (string): default `"%Y%m%d_%H%M%S"`
 
 ### `git`

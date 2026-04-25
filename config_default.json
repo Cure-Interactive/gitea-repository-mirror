@@ -44,6 +44,7 @@
     "layout": "owner/repo",
     "manifest_file_name": "_repo_sync_manifest.json",
     "output_dir": "D:/Git/GiteaMirror",
+    "post_update_gc": false,
     "update_existing": true
   }
 }

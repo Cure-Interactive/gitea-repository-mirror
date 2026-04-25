@@ -568,6 +568,37 @@ def _git(
   return _run(cmd, cwd=cwd, dry_run=dry_run)
 
 
+def _git_post_update_gc(
+  git_exe: str,
+  repo_path: str,
+  dry_run: bool,
+  extra_git_config: t.List[str] | None = None,
+) -> bool:
+  """
+  Best-effort mirror cleanup after refs have been updated.
+  """
+  _log("[GC]", f"Compacting mirror object store: {repo_path}")
+
+  steps = [
+    ["reflog", "expire", "--expire=now", "--expire-unreachable=now", "--all"],
+    ["gc", "--prune=now", "--aggressive"],
+  ]
+  ok = True
+  for args in steps:
+    rc = _git(
+      git_exe,
+      args,
+      cwd=repo_path,
+      dry_run=dry_run,
+      extra_git_config=extra_git_config,
+    )
+    if rc != 0:
+      ok = False
+      _log("[WARN]", f"Post-update cleanup step failed: {' '.join(args)}")
+      break
+  return ok
+
+
 def _is_git_repo(path: str) -> bool:
   """
   Return True if path is a valid git repository.
@@ -913,6 +944,7 @@ class RepoStatus(t.TypedDict, total=False):
   last_commit_hash_short: str
   last_commit_message: str
 
+  preserve_position: bool
   success: bool | None
 
 
@@ -1070,6 +1102,13 @@ def _sync_one_repo(
     )
     if rc != 0:
       raise RuntimeError(f"Clone failed: {repo.get('full_name')}")
+    if t.cast(bool, cfg["sync"].get("post_update_gc", False)):
+      _git_post_update_gc(
+        git_exe,
+        dest_abs,
+        dry_run=dry_run,
+        extra_git_config=extra_cfg,
+      )
     return True
 
   # Update existing
@@ -1109,6 +1148,14 @@ def _sync_one_repo(
   if rc != 0:
     raise RuntimeError(f"Update failed: {repo.get('full_name')}")
 
+  if t.cast(bool, cfg["sync"].get("post_update_gc", False)):
+    _git_post_update_gc(
+      git_exe,
+      dest_abs,
+      dry_run=dry_run,
+      extra_git_config=extra_cfg,
+    )
+
   return True
 
 class RepoRef(t.TypedDict):
@@ -1130,6 +1177,7 @@ def plan_and_apply(
   cfg: Json,
   dry_run: bool,
   *,
+  selected_full_names: t.Collection[str] | None = None,
   on_progress: t.Callable[[int, int, str], None] | None = None,
   on_repo_status: t.Callable[[RepoStatus], None] | None = None,
 ) -> int:
@@ -1169,6 +1217,19 @@ def plan_and_apply(
   _sep("LIST REPOS")
   repos = client.list_current_user_repos(page_limit=page_limit)
   _log("[🧩 API]", f"Repos accessible: {len(repos)}")
+
+  selected_names: set[str] | None = None
+  if selected_full_names is not None:
+    selected_names = {
+      str(name).strip()
+      for name in selected_full_names
+      if str(name).strip()
+    }
+    repos = [
+      r for r in repos
+      if str(r.get("full_name") or "").strip() in selected_names
+    ]
+    _log("[FILTER]", f"Selected repos requested: {len(selected_names)}; matched remotely: {len(repos)}")
 
   # ---------------------------------------------------------
   # EARLY MANIFEST + UI SEED (populate immediately)
@@ -1217,6 +1278,7 @@ def plan_and_apply(
         "last_commit_at": str(entry.get("last_commit_at") or ""),
         "last_commit_hash_short": str(entry.get("last_commit_hash_short") or ""),
         "last_commit_message": str(entry.get("last_commit_message") or ""),
+        "preserve_position": bool(selected_names is not None),
         "success": None,
       })
 
@@ -1238,7 +1300,7 @@ def plan_and_apply(
   manifest = _load_manifest(cfg)
   managed: Json = t.cast(Json, manifest.get("managed") or {})
 
-  if t.cast(bool, cfg["sync"]["archive_missing_remote"]):
+  if selected_names is None and t.cast(bool, cfg["sync"]["archive_missing_remote"]):
     _sep("ARCHIVE MISSING REMOTE")
     to_archive: t.List[t.Tuple[str, str]] = []
     for full_name, info in list(managed.items()):
@@ -1252,6 +1314,8 @@ def plan_and_apply(
       _log("[📦 ARCHIVE]", f"{full_name} -> {rel}")
       _archive_move(cfg, src_abs=abs_path, rel=rel, dry_run=dry_run)
       managed.pop(full_name, None)
+  elif selected_names is not None:
+    _log("[SKIP]", "Archive-missing-remote skipped for selected-only sync.")
 
   git_exe = t.cast(str, cfg["git"]["executable"])
   _sep("SYNC REPOS")
@@ -1287,6 +1351,7 @@ def plan_and_apply(
         "last_commit_at": str(entry_for_ui.get("last_commit_at") or ""),
         "last_commit_hash_short": str(entry_for_ui.get("last_commit_hash_short") or ""),
         "last_commit_message": str(entry_for_ui.get("last_commit_message") or ""),
+        "preserve_position": bool(selected_names is not None),
         "success": None,
       })
 
@@ -1353,6 +1418,7 @@ def plan_and_apply(
             "last_commit_at": commit_at_iso,
             "last_commit_hash_short": commit_hash_short,
             "last_commit_message": commit_msg,
+            "preserve_position": bool(selected_names is not None),
             "success": True,
           })
           _log(
@@ -1377,6 +1443,7 @@ def plan_and_apply(
             "last_commit_at": str(entry_for_ui.get("last_commit_at") or ""),
             "last_commit_hash_short": str(entry_for_ui.get("last_commit_hash_short") or ""),
             "last_commit_message": str(entry_for_ui.get("last_commit_message") or ""),
+            "preserve_position": bool(selected_names is not None),
             "success": False,
           })
 
@@ -1404,6 +1471,7 @@ def plan_and_apply(
           "last_commit_at": str(entry_for_ui.get("last_commit_at") or ""),
           "last_commit_hash_short": str(entry_for_ui.get("last_commit_hash_short") or ""),
           "last_commit_message": str(entry_for_ui.get("last_commit_message") or ""),
+          "preserve_position": bool(selected_names is not None),
           "success": False,
         })
 
@@ -1490,6 +1558,7 @@ def _build_cfg_from_vars(cfg_base: Json, vars_map: t.Dict[str, t.Any]) -> Json:
   _cfg_set(cfg, ["sync", "clone_missing"], bool(vars_map["sync_clone_missing"].get()))
   _cfg_set(cfg, ["sync", "update_existing"], bool(vars_map["sync_update_existing"].get()))
   _cfg_set(cfg, ["sync", "archive_missing_remote"], bool(vars_map["sync_archive_missing_remote"].get()))
+  _cfg_set(cfg, ["sync", "post_update_gc"], bool(vars_map["sync_post_update_gc"].get()))
   _cfg_set(cfg, ["sync", "output_dir"], str(RootPath(vars_map["sync_output_dir"].get())))
   _cfg_set(cfg, ["sync", "layout"], str(vars_map["sync_layout"].get()).strip() or "owner/repo")
   _cfg_set(cfg, ["sync", "archive_dir_name"], str(vars_map["sync_archive_dir_name"].get()).strip() or "_archive")
@@ -1542,6 +1611,7 @@ def _apply_cfg_to_vars(cfg: Json, vars_map: t.Dict[str, t.Any]) -> None:
   vars_map["sync_clone_missing"].set(bool(_cfg_get(cfg, ["sync", "clone_missing"], True)))
   vars_map["sync_update_existing"].set(bool(_cfg_get(cfg, ["sync", "update_existing"], True)))
   vars_map["sync_archive_missing_remote"].set(bool(_cfg_get(cfg, ["sync", "archive_missing_remote"], True)))
+  vars_map["sync_post_update_gc"].set(bool(_cfg_get(cfg, ["sync", "post_update_gc"], False)))
   vars_map["sync_output_dir"].set(str(_cfg_get(cfg, ["sync", "output_dir"], "")))
   vars_map["sync_layout"].set(str(_cfg_get(cfg, ["sync", "layout"], "owner/repo")))
   vars_map["sync_archive_dir_name"].set(str(_cfg_get(cfg, ["sync", "archive_dir_name"], "_archive")))
@@ -1763,6 +1833,7 @@ def _gui() -> int:
   vars_map["sync_clone_missing"] = tk.BooleanVar(value=True)
   vars_map["sync_update_existing"] = tk.BooleanVar(value=True)
   vars_map["sync_archive_missing_remote"] = tk.BooleanVar(value=True)
+  vars_map["sync_post_update_gc"] = tk.BooleanVar(value=False)
   vars_map["sync_output_dir"] = tk.StringVar()
   vars_map["sync_layout"] = tk.StringVar()
   vars_map["sync_archive_dir_name"] = tk.StringVar()
@@ -2297,6 +2368,23 @@ def _gui() -> int:
     tooltip_text="Move local repos to archive if they no longer exist on the server",
   )
 
+  post_gc_cb = ctk.CTkCheckBox(
+    s,
+    text="",
+    variable=vars_map["sync_post_update_gc"],
+  )
+  row_checkbox(
+    s,
+    8,
+    "Compact mirrors after sync",
+    post_gc_cb,
+    tooltip_text=(
+      "Opt-in mirror cleanup after clone/update.\n"
+      "Runs git reflog expire + git gc --prune=now --aggressive.\n"
+      "Useful when remote history is rewritten, but slower on large repos."
+    ),
+  )
+
   # Git section
   section_title(cfg_scroll, "Git")
   gg = ctk.CTkFrame(cfg_scroll)
@@ -2602,16 +2690,32 @@ def _gui() -> int:
   run_btns.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
 
   run_btns.grid_columnconfigure(0, weight=1)  # Run / SAFE STOP expands
-  run_btns.grid_columnconfigure(1, weight=0)  # Clone button stays tight
+  run_btns.grid_columnconfigure(1, weight=0)  # Sync selected button stays tight
+  run_btns.grid_columnconfigure(2, weight=0)  # Clone selected button stays tight
 
-  # Create Clone button EARLY so later code can .configure() it safely.
-  # (We wire its command + enable/disable state after the Treeview exists.)
+  # Create selection buttons EARLY so later code can .configure() them safely.
+  # (We wire their commands + enable/disable state after the Treeview exists.)
+  sync_selected_btn = ctk.CTkButton(
+    run_btns,
+    text="Sync Selected…",
+    state="disabled",
+  )
+  sync_selected_btn.grid(row=0, column=1, sticky="e", padx=(4, 4), pady=6)
+  tooltip(
+    sync_selected_btn,
+    text=(
+      "Sync only the selected repositories\n"
+      "from the remote into their local mirrors.\n"
+      "Selected-only sync does not archive other repos."
+    ),
+  )
+
   clone_selected_btn = ctk.CTkButton(
     run_btns,
     text="Clone Selected…",
     state="disabled",
   )
-  clone_selected_btn.grid(row=0, column=1, sticky="e", padx=(4, 6), pady=6)
+  clone_selected_btn.grid(row=0, column=2, sticky="e", padx=(4, 6), pady=6)
   tooltip(
     clone_selected_btn,
     text=(
@@ -3009,22 +3113,51 @@ def _gui() -> int:
 
     threading.Thread(target=_worker, daemon=True).start()
 
-  def _update_clone_selected_button_state(*_e):
+  def _selected_full_names_from_tree() -> list[str]:
+    try:
+      iids = repo_tree.selection()
+    except Exception:
+      return []
+
+    names: list[str] = []
+    for iid in iids:
+      values = repo_tree.item(iid, "values")
+      if not values:
+        continue
+      full_name = str(values[1]).strip()
+      if full_name:
+        names.append(full_name)
+    return names
+
+  def _update_selected_action_buttons_state(*_e):
     try:
       any_selected = bool(repo_tree.selection())
     except Exception:
       any_selected = False
-    clone_selected_btn.configure(state=("normal" if any_selected else "disabled"))
+    state = "normal" if any_selected and not RUN_STATE.running else "disabled"
+    sync_selected_btn.configure(state=state)
+    clone_selected_btn.configure(state=state)
+
+  def _sync_selected_clicked():
+    selected_full_names = _selected_full_names_from_tree()
+    if not selected_full_names:
+      return
+    _start_run(force_dry=None, selected_full_names=selected_full_names)
 
   def _clone_selected_clicked():
     repos = _resolve_repo_refs_from_iids(repo_tree.selection())
     _clone_out_to_selected_folder(repos)
 
+  sync_selected_btn.configure(command=_sync_selected_clicked)
   clone_selected_btn.configure(command=_clone_selected_clicked)
-  repo_tree.bind("<<TreeviewSelect>>", _update_clone_selected_button_state)
-  _update_clone_selected_button_state()
+  repo_tree.bind("<<TreeviewSelect>>", _update_selected_action_buttons_state)
+  _update_selected_action_buttons_state()
 
   repo_menu = tk.Menu(repo_tree, tearoff=0)
+  repo_menu.add_command(
+    label="Sync Selected from Remote",
+    command=lambda: _start_run(force_dry=None, selected_full_names=_selected_full_names_from_tree()),
+  )
   repo_menu.add_command(
     label="Clone to Folder…",
     command=lambda: _clone_out_to_selected_folder(_resolve_repo_refs_from_iids(repo_tree.selection())),
@@ -3034,7 +3167,7 @@ def _gui() -> int:
     iid = repo_tree.identify_row(event.y)
     if iid:
       repo_tree.selection_set(iid)
-      _update_clone_selected_button_state()
+      _update_selected_action_buttons_state()
       repo_menu.tk_popup(event.x_root, event.y_root)
 
   repo_tree.bind("<Button-3>", _on_repo_right_click)
@@ -3079,6 +3212,7 @@ def _gui() -> int:
   def _repo_update_row(status: RepoStatus):
     name = status["name"]
     phase = status["phase"]
+    preserve_position = bool(status.get("preserve_position"))
     idx = status.get("index", "")
     idx_int: int | None = None
     try:
@@ -3117,17 +3251,16 @@ def _gui() -> int:
       commit_message=str(status.get("last_commit_message") or ""),
     )
 
-    if idx_int is not None:
-      zebra = "even" if (idx_int % 2 == 0) else "odd"
-    else:
-      zebra = "odd"
-
-    tag = f"{status_tag_base}_{zebra}" if status_tag_base else zebra
-
     if name in _repo_tree_iids:
       iid = _repo_tree_iids[name]
       old_vals = repo_tree.item(iid, "values") or ()
-      row_idx = idx if idx_int is not None else (old_vals[0] if old_vals else idx)
+      row_idx = old_vals[0] if (preserve_position and old_vals) else (idx if idx_int is not None else (old_vals[0] if old_vals else idx))
+      try:
+        row_idx_int = int(str(row_idx))
+      except Exception:
+        row_idx_int = idx_int
+      zebra = "even" if (row_idx_int is not None and row_idx_int % 2 == 0) else "odd"
+      tag = f"{status_tag_base}_{zebra}" if status_tag_base else zebra
 
       repo_tree.item(
         iid,
@@ -3143,12 +3276,18 @@ def _gui() -> int:
       )
 
       # Keep visual order aligned with current run index.
-      if idx_int is not None:
+      if idx_int is not None and not preserve_position:
         children = repo_tree.get_children()
         if children:
           target = max(0, min(idx_int - 1, len(children) - 1))
           repo_tree.move(iid, "", target)
       return
+
+    if idx_int is not None:
+      zebra = "even" if (idx_int % 2 == 0) else "odd"
+    else:
+      zebra = "odd"
+    tag = f"{status_tag_base}_{zebra}" if status_tag_base else zebra
 
     iid = repo_tree.insert(
       "",
@@ -3200,12 +3339,14 @@ def _gui() -> int:
       command=lambda: _start_run(force_dry=None),
     )
     tooltip(run_btn, text="Start repository backup using current configuration values")
+    _update_selected_action_buttons_state()
 
-  def _run_worker(cfg):
+  def _run_worker(cfg, selected_full_names: t.Collection[str] | None = None):
     try:
       plan_and_apply(
         cfg,
         dry_run=bool(cfg.get("dry_run")),
+        selected_full_names=selected_full_names,
         on_progress=_progress_from_worker,
         on_repo_status=_repo_status_from_worker,
       )
@@ -3268,9 +3409,14 @@ def _gui() -> int:
     # UI cleanup: queued rows should go back to Idle immediately.
     app.after(0, _reset_queued_rows_to_idle)
 
-  def _start_run(*, force_dry: bool | None) -> None:
+  def _start_run(*, force_dry: bool | None, selected_full_names: t.Collection[str] | None = None) -> None:
     if RUN_STATE.running:
       _log("[⚠️ WARN]", "Run already in progress.")
+      return
+
+    selected_names = tuple(selected_full_names) if selected_full_names is not None else None
+    if selected_names is not None and not selected_names:
+      _log("[⚠️ WARN]", "No repositories selected for scoped sync.")
       return
 
     cfg_new = _build_cfg_from_vars(cfg_loaded, vars_map)
@@ -3285,6 +3431,7 @@ def _gui() -> int:
 
     RUN_STATE.running = True
     RUN_STATE.stop_requested = False
+    _update_selected_action_buttons_state()
 
     # Switch button to SAFE STOP
     run_btn.configure(
@@ -3302,9 +3449,12 @@ def _gui() -> int:
       ),
     )
 
-    _log("[🧩 GUI]", "Starting run…")
+    if selected_names is None:
+      _log("[🧩 GUI]", "Starting run…")
+    else:
+      _log("[🧩 GUI]", f"Starting selected-only sync for {len(selected_names)} repos…")
 
-    th = threading.Thread(target=_run_worker, args=(cfg_new,), daemon=True)
+    th = threading.Thread(target=_run_worker, args=(cfg_new, selected_names), daemon=True)
 
     progress_var.set(0)
     progress_label_var.set("Running...")
