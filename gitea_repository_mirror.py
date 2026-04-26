@@ -1034,6 +1034,56 @@ def _repo_clone_url(repo: Json, protocol: str) -> str:
   raise ValueError(f"Unknown protocol: {protocol}")
 
 
+def _wiki_clone_url_from_repo_url(repo_url: str) -> str:
+  url = str(repo_url or "").strip()
+  if not url:
+    return ""
+
+  if url.endswith(".wiki.git"):
+    return url
+
+  if url.endswith(".git"):
+    return url[:-4] + ".wiki.git"
+
+  return url.rstrip("/") + ".wiki.git"
+
+
+def _expand_with_wiki_repos(repos: t.Iterable[Json]) -> t.List[Json]:
+  out: t.List[Json] = []
+  seen: set[str] = set()
+
+  for repo in repos:
+    full_name = str(repo.get("full_name") or "").strip()
+    if full_name and full_name not in seen:
+      out.append(repo)
+      seen.add(full_name)
+
+    if not bool(repo.get("has_wiki")):
+      continue
+    if bool(repo.get("external_wiki")):
+      continue
+
+    owner = str((repo.get("owner") or {}).get("username") or "").strip()
+    name = str(repo.get("name") or "").strip()
+    if not owner or not name:
+      continue
+
+    wiki_full_name = f"{owner}/{name}.wiki"
+    if wiki_full_name in seen:
+      continue
+
+    wiki_repo = dict(repo)
+    wiki_repo["name"] = f"{name}.wiki"
+    wiki_repo["full_name"] = wiki_full_name
+    wiki_repo["clone_url"] = _wiki_clone_url_from_repo_url(str(repo.get("clone_url") or ""))
+    wiki_repo["ssh_url"] = _wiki_clone_url_from_repo_url(str(repo.get("ssh_url") or ""))
+
+    out.append(t.cast(Json, wiki_repo))
+    seen.add(wiki_full_name)
+
+  return out
+
+
 def _sync_one_repo(
   cfg: Json,
   git_exe: str,
@@ -1215,8 +1265,8 @@ def plan_and_apply(
   _log("[🧩 API]", f"Authenticated as: {username or '<unknown>'}")
 
   _sep("LIST REPOS")
-  repos = client.list_current_user_repos(page_limit=page_limit)
-  _log("[🧩 API]", f"Repos accessible: {len(repos)}")
+  repos = _expand_with_wiki_repos(client.list_current_user_repos(page_limit=page_limit))
+  _log("[🧩 API]", f"Repos accessible (including wiki mirrors): {len(repos)}")
 
   selected_names: set[str] | None = None
   if selected_full_names is not None:
